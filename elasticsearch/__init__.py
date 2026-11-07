@@ -43,6 +43,19 @@ logger = logging.getLogger("elasticsearch")
 logger.addHandler(logging.NullHandler())
 
 from ._async.client import AsyncElasticsearch as AsyncElasticsearch
+from ._runtime_policy import (
+    OpAdmit,
+    RuntimePolicy,
+    RuntimePolicyFrame,
+    ScrollGate,
+    ScrollState,
+    WriteGate,
+    apop_runtime_policy,
+    async_runtime_policy,
+    pop_runtime_policy,
+    push_runtime_policy,
+    runtime_policy,
+)
 from ._sync.client import Elasticsearch as Elasticsearch
 from .exceptions import ElasticsearchDeprecationWarning  # noqa: F401
 from .exceptions import (
@@ -56,6 +69,7 @@ from .exceptions import (
     ElasticsearchWarning,
     NotFoundError,
     RequestError,
+    RuntimePolicyError,
     SerializationError,
     SSLError,
     TransportError,
@@ -78,8 +92,15 @@ __all__ = [
     "BadRequestError",
     "Elasticsearch",
     "JsonSerializer",
+    "OpAdmit",
+    "RuntimePolicy",
+    "RuntimePolicyError",
+    "RuntimePolicyFrame",
+    "ScrollGate",
+    "ScrollState",
     "SerializationError",
     "TransportError",
+    "WriteGate",
     "NotFoundError",
     "ConflictError",
     "RequestError",
@@ -90,6 +111,11 @@ __all__ = [
     "AuthorizationException",
     "UnsupportedProductError",
     "ElasticsearchWarning",
+    "apop_runtime_policy",
+    "async_runtime_policy",
+    "pop_runtime_policy",
+    "push_runtime_policy",
+    "runtime_policy",
 ]
 if OrjsonSerializer is not None:
     __all__.append("OrjsonSerializer")

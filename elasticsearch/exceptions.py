@@ -28,6 +28,7 @@ from elastic_transport import TransportWarning
 __all__ = [
     "SerializationError",
     "TransportError",
+    "RuntimePolicyError",
     "ConnectionError",
     "SSLError",
     "ConnectionTimeout",

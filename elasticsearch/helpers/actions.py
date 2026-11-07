@@ -19,6 +19,8 @@ import base64
 import logging
 import queue
 import time
+from collections import deque
+from contextvars import copy_context
 from enum import Enum
 from operator import methodcaller
 from typing import (
@@ -41,6 +43,7 @@ from typing import (
 from elastic_transport import OpenTelemetrySpan
 
 from .. import Elasticsearch
+from .._runtime_policy import ScrollState
 from ..compat import safe_thread, to_bytes
 from ..exceptions import ApiError, NotFoundError, TransportError
 from ..serializer import Serializer
@@ -622,6 +625,35 @@ def bulk(
     return success, failed if stats_only else errors
 
 
+def _run_parallel_bulk_chunk(
+    client: Elasticsearch,
+    bulk_chunk: Tuple[
+        List[
+            Union[
+                Tuple[_TYPE_BULK_ACTION_HEADER],
+                Tuple[_TYPE_BULK_ACTION_HEADER, _TYPE_BULK_ACTION_BODY],
+            ]
+        ],
+        List[bytes],
+    ],
+    otel_span: OpenTelemetrySpan,
+    ignore_status: Union[int, Collection[int]],
+    request_args: Tuple[Any, ...],
+    request_kwargs: Dict[str, Any],
+) -> List[Tuple[bool, Dict[str, Any]]]:
+    return list(
+        _process_bulk_chunk(
+            client,
+            bulk_chunk[1],
+            bulk_chunk[0],
+            otel_span=otel_span,
+            ignore_status=ignore_status,  # type: ignore[misc]
+            *request_args,
+            **request_kwargs,
+        )
+    )
+
+
 def parallel_bulk(
     client: Elasticsearch,
     actions: Iterable[_TYPE_BULK_ACTION],
@@ -685,28 +717,45 @@ def parallel_bulk(
 
     with client._otel.helpers_span("helpers.parallel_bulk") as otel_span:
         pool = BlockingPool(thread_count)
+        chunks = _chunk_actions(
+            expanded_actions,
+            chunk_size,
+            max_chunk_bytes,
+            flush_after_seconds,
+            serializer,
+        )
+        max_pending = max(queue_size, thread_count)
+        pending_results = deque()
+
+        def submit_next_chunk() -> bool:
+            try:
+                bulk_chunk = next(chunks)
+            except StopIteration:
+                return False
+            context = copy_context()
+            pending_results.append(
+                pool.apply_async(
+                    context.run,
+                    (
+                        _run_parallel_bulk_chunk,
+                        client,
+                        bulk_chunk,
+                        otel_span,
+                        ignore_status,
+                        args,
+                        kwargs,
+                    ),
+                )
+            )
+            return True
 
         try:
-            for result in pool.imap(
-                lambda bulk_chunk: list(
-                    _process_bulk_chunk(
-                        client,
-                        bulk_chunk[1],
-                        bulk_chunk[0],
-                        otel_span=otel_span,
-                        ignore_status=ignore_status,  # type: ignore[misc]
-                        *args,
-                        **kwargs,
-                    )
-                ),
-                _chunk_actions(
-                    expanded_actions,
-                    chunk_size,
-                    max_chunk_bytes,
-                    flush_after_seconds,
-                    serializer,
-                ),
-            ):
+            while len(pending_results) < max_pending and submit_next_chunk():
+                pass
+
+            while pending_results:
+                result = pending_results.popleft().get()
+                submit_next_chunk()
                 yield from result
 
         finally:
@@ -781,6 +830,7 @@ def scan(
 
     """
     scroll_kwargs = scroll_kwargs or {}
+    scroll_state = ScrollState()
     if not preserve_order:
         query = query.copy() if query else {}
         query["sort"] = "_doc"
@@ -834,6 +884,7 @@ def scan(
         resp = client.search(body=query, **search_kwargs)
 
     scroll_id = resp.get("_scroll_id")
+    scroll_state.bind(scroll_id)
     scroll_transport_kwargs = pop_transport_kwargs(scroll_kwargs)
     if scroll_transport_kwargs:
         scroll_client = client.options(**scroll_transport_kwargs)
@@ -873,9 +924,10 @@ def scan(
                 scroll_id=scroll_id, scroll=scroll, **scroll_kwargs
             )
             scroll_id = resp.get("_scroll_id")
+            scroll_state.bind(scroll_id)
 
     finally:
-        if scroll_id and clear_scroll:
+        if scroll_id and clear_scroll and not scroll_state.closed:
             client.options(ignore_status=404).clear_scroll(scroll_id=scroll_id)
 
 

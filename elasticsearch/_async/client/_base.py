@@ -46,6 +46,12 @@ from elastic_transport import (
 from elastic_transport.client_utils import DEFAULT, DefaultType
 
 from ..._otel import OpenTelemetry
+from ..._runtime_policy import (
+    _Admission,
+    admit_request,
+    record_request_exception,
+    record_response,
+)
 from ..._version import _SERVERLESS_API_VERSION, __versionstr__
 from ...compat import warn_stacklevel
 from ...exceptions import (
@@ -266,6 +272,7 @@ class BaseClient:
         endpoint_id: Optional[str] = None,
         path_parts: Optional[Mapping[str, Any]] = None,
     ) -> ApiResponse[Any]:
+        admission = admit_request(endpoint_id, body=body)
         with self._otel.span(
             method,
             endpoint_id=endpoint_id,
@@ -278,6 +285,7 @@ class BaseClient:
                 headers=headers,
                 body=body,
                 otel_span=otel_span,
+                admission=admission,
             )
             otel_span.set_elastic_cloud_metadata(response.meta.headers)
             return response
@@ -291,6 +299,7 @@ class BaseClient:
         headers: Optional[Mapping[str, str]] = None,
         body: Optional[Any] = None,
         otel_span: OpenTelemetrySpan,
+        admission: _Admission,
     ) -> ApiResponse[Any]:
         if headers:
             request_headers = self._headers.copy()
@@ -319,19 +328,33 @@ class BaseClient:
         else:
             target = path
 
-        meta, resp_body = await self.transport.perform_request(
-            method,
-            target,
-            headers=request_headers,
-            body=body,
-            request_timeout=self._request_timeout,
-            max_retries=self._max_retries,
-            retry_on_status=self._retry_on_status,
-            retry_on_timeout=self._retry_on_timeout,
-            retry_backoff_base=self._retry_backoff_base,
-            retry_backoff_cap=self._retry_backoff_cap,
-            client_meta=self._client_meta,
-            otel_span=otel_span,
+        try:
+            meta, resp_body = await self.transport.perform_request(
+                method,
+                target,
+                headers=request_headers,
+                body=body,
+                request_timeout=self._request_timeout,
+                max_retries=self._max_retries,
+                retry_on_status=self._retry_on_status,
+                retry_on_timeout=self._retry_on_timeout,
+                retry_backoff_base=self._retry_backoff_base,
+                retry_backoff_cap=self._retry_backoff_cap,
+                client_meta=self._client_meta,
+                otel_span=otel_span,
+            )
+        except Exception:
+            record_request_exception(admission)
+            raise
+
+        record_response(
+            admission,
+            status=meta.status,
+            params=params,
+            request_body=body,
+            response_body=resp_body,
+            client=self,
+            is_async=True,
         )
 
         # HEAD with a 404 is returned as a normal response

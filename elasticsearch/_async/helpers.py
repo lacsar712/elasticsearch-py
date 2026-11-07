@@ -36,6 +36,7 @@ from typing import (
 import sniffio
 from anyio import create_memory_object_stream, create_task_group, move_on_after
 
+from .._runtime_policy import ScrollState
 from ..exceptions import ApiError, NotFoundError, TransportError
 from ..helpers.actions import (
     _TYPE_BULK_ACTION,
@@ -471,6 +472,7 @@ async def async_scan(
         )
     """
     scroll_kwargs = scroll_kwargs or {}
+    scroll_state = ScrollState()
 
     if not preserve_order:
         query = query.copy() if query else {}
@@ -525,6 +527,7 @@ async def async_scan(
         resp = await client.search(body=query, **search_kwargs)
 
     scroll_id: Optional[str] = resp.get("_scroll_id")
+    scroll_state.bind(scroll_id)
     scroll_transport_kwargs = pop_transport_kwargs(scroll_kwargs)
     if scroll_transport_kwargs:
         scroll_client = client.options(**scroll_transport_kwargs)
@@ -565,9 +568,10 @@ async def async_scan(
                 scroll_id=scroll_id, scroll=scroll, **scroll_kwargs
             )
             scroll_id = resp.get("_scroll_id")
+            scroll_state.bind(scroll_id)
 
     finally:
-        if scroll_id and clear_scroll:
+        if scroll_id and clear_scroll and not scroll_state.closed:
             await client.options(ignore_status=404).clear_scroll(scroll_id=scroll_id)
 
 
